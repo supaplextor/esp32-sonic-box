@@ -19,6 +19,9 @@ the ESP32 Arduino framework and installs ESP8266Audio and TFT_eSPI.
 5. Tap a track to start playback. Use the on-screen UP and DOWN buttons to
    scroll the file list.
 
+Playback errors and file paths are reported on the serial monitor. MP3 files
+with ID3v2 tags are played without displaying their embedded metadata.
+
 Touch calibration constants are in `src/main.cpp` (`kTouchXMin`, `kTouchXMax`,
 `kTouchYMin`, `kTouchYMax`). If touches are offset on your display, adjust
 those values using Freenove's touch calibration sketch.
