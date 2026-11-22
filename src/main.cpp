@@ -5,9 +5,10 @@
 #include <TFT_eSPI.h>
 
 #include "AudioFileSourceSD.h"
-#include "AudioFileSourceID3.h"
 #include "AudioGeneratorMP3.h"
 #include "AudioOutputI2S.h"
+
+#include "id3_header.h"
 
 #include <algorithm>
 #include <vector>
@@ -50,7 +51,6 @@ size_t firstVisibleTrackIndex = 0;
 String statusLine = "Scanning SD card...";
 
 AudioFileSourceSD* audioFile = nullptr;
-AudioFileSourceID3* id3Source = nullptr;
 AudioOutputI2S* audioOutput = nullptr;
 AudioGeneratorMP3* mp3Decoder = nullptr;
 
@@ -122,10 +122,6 @@ void stopPlayback() {
     delete mp3Decoder;
     mp3Decoder = nullptr;
   }
-  if (id3Source != nullptr) {
-    delete id3Source;
-    id3Source = nullptr;
-  }
   if (audioFile != nullptr) {
     delete audioFile;
     audioFile = nullptr;
@@ -145,12 +141,43 @@ void startPlayback(const String& path) {
   stopPlayback();
 
   audioFile = new AudioFileSourceSD(path.c_str());
-  id3Source = new AudioFileSourceID3(audioFile);
+  if (!audioFile->isOpen()) {
+    Serial.printf("Unable to open %s\n", path.c_str());
+    setStatusLine("Unable to open track");
+    stopPlayback();
+    return;
+  }
+
+  uint8_t header[10];
+  size_t headerLength = audioFile->read(header, sizeof(header));
+  uint32_t fileSize = audioFile->getSize();
+  if (fileSize == 0 || headerLength != std::min(static_cast<uint32_t>(sizeof(header)), fileSize)) {
+    Serial.printf("Unable to read MP3 header: %s\n", path.c_str());
+    setStatusLine("Unable to read track");
+    stopPlayback();
+    return;
+  }
+
+  uint32_t audioOffset = 0;
+  if (id3AudioOffset(header, headerLength, fileSize, audioOffset) == Id3HeaderResult::Invalid) {
+    Serial.printf("Invalid ID3 header: %s\n", path.c_str());
+    setStatusLine("Invalid MP3 header");
+    stopPlayback();
+    return;
+  }
+  if (!audioFile->seek(audioOffset, SEEK_SET)) {
+    Serial.printf("Unable to seek to MP3 audio: %s\n", path.c_str());
+    setStatusLine("Unable to read track");
+    stopPlayback();
+    return;
+  }
+
   audioOutput = new AudioOutputI2S(0, 1);
   audioOutput->SetGain(1.0f);
   mp3Decoder = new AudioGeneratorMP3();
 
-  if (!mp3Decoder->begin(id3Source, audioOutput)) {
+  if (!mp3Decoder->begin(audioFile, audioOutput)) {
+    Serial.printf("Unable to start decoder: %s\n", path.c_str());
     setStatusLine("Failed to play: " + displayNameForPath(path));
     stopPlayback();
     return;
@@ -328,9 +355,11 @@ void setup() {
 
 void loop() {
   if (mp3Decoder != nullptr && mp3Decoder->isRunning() && !mp3Decoder->loop()) {
-    yield();
-    mp3Decoder->stop();
-    setStatusLine("Playback finished");
+    bool reachedEnd = mp3Decoder->isRunning() &&
+                      audioFile->getPos() >= audioFile->getSize();
+    Serial.println(reachedEnd ? "Playback finished" : "Playback stopped: decoder error");
+    stopPlayback();
+    setStatusLine(reachedEnd ? "Playback finished" : "Playback error");
   }
 
   if (trackPaths.empty()) {
@@ -338,14 +367,18 @@ void loop() {
     return;
   }
 
-  uint16_t touchX = 0;
-  uint16_t touchY = 0;
-  bool touchDown = readTouchPoint(touchX, touchY);
+  static unsigned long lastTouchPollAtMs = 0;
+  if (millis() - lastTouchPollAtMs >= 20) {
+    lastTouchPollAtMs = millis();
+    uint16_t touchX = 0;
+    uint16_t touchY = 0;
+    bool touchDown = readTouchPoint(touchX, touchY);
 
-  if (touchDown && !touchWasDown && (millis() - lastTouchHandledAtMs > 140)) {
-    lastTouchHandledAtMs = millis();
-    handleTouch(touchX, touchY);
+    if (touchDown && !touchWasDown && (millis() - lastTouchHandledAtMs > 140)) {
+      lastTouchHandledAtMs = millis();
+      handleTouch(touchX, touchY);
+    }
+    touchWasDown = touchDown;
   }
-  touchWasDown = touchDown;
-  delay(20);
+  yield();
 }
