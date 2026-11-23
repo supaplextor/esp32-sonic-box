@@ -18,6 +18,7 @@ constexpr int kSdChipSelectPin = 5;
 constexpr int kSdMosiPin = 23;
 constexpr int kSdMisoPin = 19;
 constexpr int kSdClockPin = 18;
+constexpr uint32_t kSdSpiFrequency = 1000000;
 constexpr int kTouchDataOutPin = 39;
 constexpr int kTouchDataInPin = 32;
 constexpr int kTouchChipSelectPin = 33;
@@ -344,7 +345,7 @@ void setup() {
   initTouchController();
 
   sdSpi.begin(kSdClockPin, kSdMisoPin, kSdMosiPin, kSdChipSelectPin);
-  if (!SD.begin(kSdChipSelectPin, sdSpi)) {
+  if (!SD.begin(kSdChipSelectPin, sdSpi, kSdSpiFrequency)) {
     Serial.println("Unable to initialize the SD card.");
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_RED, TFT_BLACK);
