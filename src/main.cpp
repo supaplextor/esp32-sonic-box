@@ -81,6 +81,13 @@ String appendPath(const String& directory, const String& name) {
   return directory + "/" + name;
 }
 
+void drawScanProgress() {
+  tft.fillRect(0, 0, kDisplayWidth, kHeaderHeight, TFT_DARKGREY);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  tft.drawString("Found MP3 files: " + String(trackPaths.size()), 6, kHeaderHeight / 2, 2);
+}
+
 void scanDirectoryForMp3(const String& directoryPath) {
   File directory = SD.open(directoryPath.c_str());
   if (!directory || !directory.isDirectory()) {
@@ -98,6 +105,7 @@ void scanDirectoryForMp3(const String& directoryPath) {
       scanDirectoryForMp3(appendPath(directoryPath, entryName));
     } else if (hasMp3Extension(entryName)) {
       trackPaths.push_back(appendPath(directoryPath, entryName));
+      drawScanProgress();
     }
 
     entry.close();
@@ -221,6 +229,8 @@ void drawTrackList() {
 
 void scanTracks() {
   trackPaths.clear();
+  drawScanProgress();
+  setStatusLine("Scanning SD card...");
   scanDirectoryForMp3("/");
 
   std::sort(trackPaths.begin(), trackPaths.end(), [](const String& left, const String& right) {

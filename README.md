@@ -4,9 +4,10 @@ Freenove ESP32 FNK0103 F 2.8in ILI9341 touch screen MP3 player
 ## Build and upload with VS Code and PlatformIO
 
 The firmware in `src/main.cpp` scans the SD card for `.mp3` files, shows them
-on the ILI9341 touch display, and starts playback through the onboard DAC and
-speaker amplifier when you tap a track. The PlatformIO configuration targets
-the ESP32 Arduino framework and installs ESP8266Audio and TFT_eSPI.
+on the ILI9341 touch display, shows the running file count while scanning, and
+starts playback through the onboard DAC and speaker amplifier when you tap a
+track. The PlatformIO configuration targets the ESP32 Arduino framework and
+installs ESP8266Audio and TFT_eSPI.
 
 1. Install Visual Studio Code and its PlatformIO IDE extension.
 2. Open this repository as a PlatformIO project. PlatformIO will install the
