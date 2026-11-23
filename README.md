@@ -23,6 +23,13 @@ installs ESP8266Audio and TFT_eSPI.
 Playback errors and file paths are reported on the serial monitor. MP3 files
 with ID3v2 tags are played without displaying their embedded metadata.
 
+The SD SPI clock is set to 1 MHz in `src/main.cpp` to improve reliability with
+cards or wiring sensitive to the default 4 MHz clock. This can slow scanning
+and may not sustain every high-bitrate file. If `sdReadSectors(): command
+failed` persists, check the card contacts, wiring and power supply, and test
+the card and filesystem on a computer or try another card. A FAT32 partition
+alone does not rule out an SD communication or card fault.
+
 Touch calibration constants are in `src/main.cpp` (`kTouchXMin`, `kTouchXMax`,
 `kTouchYMin`, `kTouchYMax`). If touches are offset on your display, adjust
 those values using Freenove's touch calibration sketch.
