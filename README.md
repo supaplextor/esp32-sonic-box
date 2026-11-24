@@ -1,6 +1,8 @@
 # esp32-sonic-box
 Freenove ESP32 FNK0103 F 2.8in ILI9341 touch screen MP3 player
 
+<img width="3000" height="4000" alt="sonic-box-front" src="https://github.com/user-attachments/assets/88c5c82d-c117-44c1-bed5-03a3b015fc03" />
+
 ## Build and upload with VS Code and PlatformIO
 
 The firmware in `src/main.cpp` browses `.mp3` files on the SD card, shows them
