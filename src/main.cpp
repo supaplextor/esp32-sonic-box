@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <TFT_eSPI.h>
+#include <Preferences.h>
 
 #include "AudioGeneratorMP3.h"
 #include "AudioOutputI2S.h"
@@ -20,6 +21,7 @@ constexpr int kSdMosiPin = 23;
 constexpr int kSdMisoPin = 19;
 constexpr int kSdClockPin = 18;
 constexpr uint32_t kSdSpiFrequency = 4000000;
+constexpr uint32_t kSlowSdSpiFrequency = 1000000;
 constexpr int kTouchDataOutPin = 39;
 constexpr int kTouchDataInPin = 32;
 constexpr int kTouchChipSelectPin = 33;
@@ -49,6 +51,11 @@ TFT_eSPI tft = TFT_eSPI();
 
 String selectedTrackPath;
 String statusLine = "Loading MP3 files...";
+Preferences preferences;
+bool singleBlockReads = true;
+bool slowSdClock = false;
+bool settingsOpen = false;
+bool sdReady = false;
 
 AudioFileSourceSdSingleBlock* audioFile = nullptr;
 AudioOutputI2S* audioOutput = nullptr;
@@ -164,7 +171,7 @@ void startPlayback(const String& path) {
 
   stopPlayback();
 
-  audioFile = new AudioFileSourceSdSingleBlock(path.c_str());
+  audioFile = new AudioFileSourceSdSingleBlock(path.c_str(), singleBlockReads);
   if (!audioFile->isOpen()) {
     Serial.printf("Unable to open %s\n", path.c_str());
     setStatusLine("Unable to open track");
@@ -216,6 +223,14 @@ void drawTrackList() {
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
   tft.drawString("MP3 page: " + String(trackPage.page() + 1), 6, kHeaderHeight / 2, 2);
+  tft.drawCircle(kDisplayWidth - 12, 12, 6, TFT_WHITE);
+  tft.drawCircle(kDisplayWidth - 12, 12, 2, TFT_WHITE);
+  for (int i = 0; i < 8; ++i) {
+    const int8_t dx[] = {0, 5, 7, 5, 0, -5, -7, -5};
+    const int8_t dy[] = {-7, -5, 0, 5, 7, 5, 0, -5};
+    tft.drawLine(kDisplayWidth - 12 + dx[i], 12 + dy[i],
+                 kDisplayWidth - 12 + dx[i] * 9 / 7, 12 + dy[i] * 9 / 7, TFT_WHITE);
+  }
 
   tft.fillRect(0, kListTop, kListWidth, kListHeight, TFT_BLACK);
   for (uint16_t row = 0; row < kRowsPerPage; ++row) {
@@ -231,6 +246,19 @@ void drawTrackList() {
       String label = displayNameForPath(trackPage[row]);
       tft.drawString(label, 6, rowY + (kRowHeight / 2), 2);
     }
+  }
+
+  void drawSettings() {
+    tft.fillRect(0, 0, kDisplayWidth, kDisplayHeight - kFooterHeight, TFT_BLACK);
+    tft.fillRect(0, 0, kDisplayWidth, kHeaderHeight, TFT_DARKGREY);
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
+    tft.drawString("Settings", 6, kHeaderHeight / 2, 2);
+    tft.drawString("BACK", kDisplayWidth - 50, kHeaderHeight / 2, 2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString(String("Single-sector reads: ") + (singleBlockReads ? "ON" : "OFF"), 6, 48, 2);
+    tft.drawString(String("Slow SD clock: ") + (slowSdClock ? "ON" : "OFF"), 6, 80, 2);
+    tft.drawString("Reads: next track; clock: restart", 6, 116, 2);
   }
 
   tft.fillRect(kButtonX, kListTop, kButtonWidth, kListHeight, TFT_DARKCYAN);
@@ -292,6 +320,34 @@ void handleTrackSelection(size_t index) {
 }
 
 void handleTouch(uint16_t x, uint16_t y) {
+  if (settingsOpen) {
+    if (y < kHeaderHeight && x >= kDisplayWidth - 60) {
+      settingsOpen = false;
+      drawTrackList();
+      return;
+    }
+    if (y >= 32 && y < 96) {
+      bool& setting = y < 64 ? singleBlockReads : slowSdClock;
+      const char* key = y < 64 ? "singleBlock" : "slowClock";
+      bool value = !setting;
+      if (preferences.putBool(key, value) == 1) {
+        setting = value;
+        setStatusLine(y < 64 ? "Saved; applies to next track" : "Saved; restart to apply");
+      } else {
+        setStatusLine("Unable to save setting");
+      }
+      drawSettings();
+    }
+    return;
+  }
+  if (y < kHeaderHeight && x >= kDisplayWidth - 48) {
+    settingsOpen = true;
+    drawSettings();
+    return;
+  }
+  if (!sdReady) {
+    return;
+  }
   if (y < kListTop || y >= (kListTop + kListHeight)) {
     return;
   }
@@ -337,14 +393,21 @@ void setup() {
 
   initTouchController();
 
+  if (preferences.begin("sonic-settings", false)) {
+    singleBlockReads = preferences.getBool("singleBlock", true);
+    slowSdClock = preferences.getBool("slowClock", false);
+  } else {
+    Serial.println("Unable to open settings storage.");
+  }
+
   sdSpi.begin(kSdClockPin, kSdMisoPin, kSdMosiPin, kSdChipSelectPin);
-  if (!SD.begin(kSdChipSelectPin, sdSpi, kSdSpiFrequency)) {
+  if (!SD.begin(kSdChipSelectPin, sdSpi, slowSdClock ? kSlowSdSpiFrequency : kSdSpiFrequency)) {
     Serial.println("Unable to initialize the SD card.");
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawString("SD init failed", 8, 8, 2);
+    drawTrackList();
+    setStatusLine("SD init failed");
     return;
   }
+  sdReady = true;
 
   setStatusLine("Loading MP3 files...");
   trackPage.begin();
@@ -370,11 +433,6 @@ void servicePlayback() {
 
 void loop() {
   servicePlayback();
-
-  if (trackPage.count() == 0) {
-    delay(50);
-    return;
-  }
 
   static unsigned long lastTouchPollAtMs = 0;
   if (millis() - lastTouchPollAtMs >= 20) {

@@ -27,9 +27,13 @@ rescans from the root, so it can take longer on large cards.
 Playback errors and file paths are reported on the serial monitor. MP3 files
 with ID3v2 tags are played without displaying their embedded metadata.
 
-The SD SPI clock is set to 1 MHz in `src/main.cpp` to improve reliability with
-cards or wiring sensitive to the default 4 MHz clock. This can slow scanning
-and may not sustain every high-bitrate file. If `sdReadSectors(): command
+Tap the gear in the top-right corner to open settings, including when the card
+cannot be initialized or contains no tracks. **Single-sector reads** is enabled
+by default to work around cards that fail multi-sector SPI reads; changing it
+applies to the next track. **Slow SD clock** selects 1 MHz instead of the
+default 4 MHz and takes effect after a restart. Both settings are saved in
+nonvolatile storage. A slow clock can slow scanning and may not sustain every
+high-bitrate file. If `sdReadSectors(): command
 failed` persists, check the card contacts, wiring and power supply, and test
 the card and filesystem on a computer or try another card. A FAT32 partition
 alone does not rule out an SD communication or card fault.
