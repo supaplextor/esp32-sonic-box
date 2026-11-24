@@ -10,11 +10,15 @@ class TrackPage {
   bool begin() {
     count_ = 0;
     page_ = 0;
+    atEnd_ = false;
     cursorValid_ = source_.reset();
     return cursorValid_ && readPage();
   }
 
   bool next() {
+    if (atEnd_) {
+      return false;
+    }
     if (!cursorValid_ && !seekToPage(page_ + 1)) {
       return false;
     }
@@ -26,7 +30,12 @@ class TrackPage {
   }
 
   bool previous() {
-    if (page_ == 0 || !seekToPage(page_ - 1) || !readPage()) {
+    if (page_ == 0) {
+      return false;
+    }
+    bool wasAtEnd = atEnd_;
+    if (!seekToPage(page_ - 1) || !readPage()) {
+      atEnd_ = wasAtEnd;
       return false;
     }
     --page_;
@@ -49,13 +58,19 @@ class TrackPage {
 
   bool readPage() {
     Path path;
+    atEnd_ = false;
     if (!source_.next(path)) {
       cursorValid_ = false;
+      atEnd_ = true;
       return false;
     }
     paths_[0] = path;
     count_ = 1;
-    while (count_ < PageSize && source_.next(path)) {
+    while (count_ < PageSize) {
+      if (!source_.next(path)) {
+        atEnd_ = true;
+        break;
+      }
       paths_[count_++] = path;
     }
     cursorValid_ = true;
@@ -67,4 +82,5 @@ class TrackPage {
   size_t count_ = 0;
   size_t page_ = 0;
   bool cursorValid_ = false;
+  bool atEnd_ = false;
 };

@@ -52,9 +52,12 @@ int main() {
   assert(page.next());
   assert(page.page() == 2 && page.count() == 3);
   assert(page[0] == "track14" && page[2] == "track16");
+  size_t reads = source.reads;
+  resets = source.resets;
   assert(!page.next());
   assert(page.page() == 2 && page.count() == 3 && page[2] == "track16");
   assert(!page.next());
+  assert(source.reads == reads && source.resets == resets);
   assert(page.previous());
   assert(page.page() == 1 && page.count() == 7 && page[0] == "track7");
   assert(page.next());
@@ -68,4 +71,8 @@ int main() {
   assert(page.begin());
   assert(!page.next());
   assert(page.page() == 0 && page.count() == 7 && page[6] == "track6");
+  reads = source.reads;
+  resets = source.resets;
+  assert(!page.next());
+  assert(source.reads == reads && source.resets == resets);
 }
