@@ -4,10 +4,10 @@
 #include <SD.h>
 #include <TFT_eSPI.h>
 
-#include "AudioFileSourceSD.h"
 #include "AudioGeneratorMP3.h"
 #include "AudioOutputI2S.h"
 
+#include "audio_file_source_sd_single_block.h"
 #include "id3_header.h"
 #include "track_page.h"
 
@@ -19,7 +19,7 @@ constexpr int kSdChipSelectPin = 5;
 constexpr int kSdMosiPin = 23;
 constexpr int kSdMisoPin = 19;
 constexpr int kSdClockPin = 18;
-constexpr uint32_t kSdSpiFrequency = 1000000;
+constexpr uint32_t kSdSpiFrequency = 4000000;
 constexpr int kTouchDataOutPin = 39;
 constexpr int kTouchDataInPin = 32;
 constexpr int kTouchChipSelectPin = 33;
@@ -50,7 +50,7 @@ TFT_eSPI tft = TFT_eSPI();
 String selectedTrackPath;
 String statusLine = "Loading MP3 files...";
 
-AudioFileSourceSD* audioFile = nullptr;
+AudioFileSourceSdSingleBlock* audioFile = nullptr;
 AudioOutputI2S* audioOutput = nullptr;
 AudioGeneratorMP3* mp3Decoder = nullptr;
 
@@ -164,7 +164,7 @@ void startPlayback(const String& path) {
 
   stopPlayback();
 
-  audioFile = new AudioFileSourceSD(path.c_str());
+  audioFile = new AudioFileSourceSdSingleBlock(path.c_str());
   if (!audioFile->isOpen()) {
     Serial.printf("Unable to open %s\n", path.c_str());
     setStatusLine("Unable to open track");
