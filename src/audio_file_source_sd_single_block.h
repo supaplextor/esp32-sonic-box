@@ -8,15 +8,16 @@
 // which makes the ESP32 SD driver log "sdReadSectors(): command failed" and
 // return no data. FatFS only issues a multi-block read when a single request
 // spans two or more full sectors, so pinning the stdio buffer at one sector
-// and capping every read at 512 bytes keeps all file reads on the reliable
-// single-block (CMD17) path.
+// and capping every read at 512 bytes keeps file reads on the reliable
+// single-block (CMD17) path when the workaround is enabled.
 class AudioFileSourceSdSingleBlock : public AudioFileSource {
  public:
   static constexpr uint32_t kSectorSize = 512;
 
   AudioFileSourceSdSingleBlock() = default;
 
-  explicit AudioFileSourceSdSingleBlock(const char* filename) {
+  explicit AudioFileSourceSdSingleBlock(const char* filename, bool singleBlock = true)
+      : singleBlock_(singleBlock) {
     open(filename);
   }
 
@@ -30,7 +31,9 @@ class AudioFileSourceSdSingleBlock : public AudioFileSource {
     if (!file_) {
       return false;
     }
-    file_.setBufferSize(kSectorSize);
+    if (singleBlock_) {
+      file_.setBufferSize(kSectorSize);
+    }
     return true;
   }
 
@@ -42,7 +45,7 @@ class AudioFileSourceSdSingleBlock : public AudioFileSource {
     uint32_t total = 0;
     while (total < len) {
       uint32_t remaining = len - total;
-      uint32_t chunk = remaining < kSectorSize ? remaining : kSectorSize;
+      uint32_t chunk = singleBlock_ && remaining > kSectorSize ? kSectorSize : remaining;
       size_t bytesRead = file_.read(out + total, chunk);
       total += bytesRead;
       if (bytesRead < chunk) {
@@ -87,4 +90,5 @@ class AudioFileSourceSdSingleBlock : public AudioFileSource {
 
  private:
   File file_;
+  bool singleBlock_ = true;
 };
