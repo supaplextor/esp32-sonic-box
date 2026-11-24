@@ -9,6 +9,7 @@
 #include "AudioOutputI2S.h"
 
 #include "id3_header.h"
+#include "track_page.h"
 
 #include <algorithm>
 #include <vector>
@@ -26,7 +27,7 @@ constexpr int kTouchClockPin = 25;
 
 constexpr uint16_t kDisplayWidth = 320;
 constexpr uint16_t kDisplayHeight = 240;
-constexpr uint16_t kRowsPerPage = 6;
+constexpr uint16_t kRowsPerPage = 7;
 constexpr uint16_t kHeaderHeight = 24;
 constexpr uint16_t kFooterHeight = 24;
 constexpr uint16_t kListTop = kHeaderHeight;
@@ -46,10 +47,8 @@ constexpr uint16_t kTouchYMax = 3464;
 SPIClass sdSpi(VSPI);
 TFT_eSPI tft = TFT_eSPI();
 
-std::vector<String> trackPaths;
-size_t selectedTrackIndex = 0;
-size_t firstVisibleTrackIndex = 0;
-String statusLine = "Scanning SD card...";
+String selectedTrackPath;
+String statusLine = "Loading MP3 files...";
 
 AudioFileSourceSD* audioFile = nullptr;
 AudioOutputI2S* audioOutput = nullptr;
@@ -82,38 +81,54 @@ String appendPath(const String& directory, const String& name) {
   return directory + "/" + name;
 }
 
-void drawScanProgress() {
-  tft.fillRect(0, 0, kDisplayWidth, kHeaderHeight, TFT_DARKGREY);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
-  tft.drawString("Found MP3 files: " + String(trackPaths.size()), 6, kHeaderHeight / 2, 2);
-}
+void servicePlayback();
 
-void scanDirectoryForMp3(const String& directoryPath) {
-  File directory = SD.open(directoryPath.c_str());
-  if (!directory || !directory.isDirectory()) {
-    return;
+class SdTrackSource {
+ public:
+  bool reset() {
+    directories_.clear();
+    File root = SD.open("/");
+    if (!root || !root.isDirectory()) {
+      return false;
+    }
+    directories_.push_back({root, "/"});
+    return true;
   }
 
-  while (true) {
-    File entry = directory.openNextFile();
-    if (!entry) {
-      break;
-    }
+  bool next(String& path) {
+    while (!directories_.empty()) {
+      servicePlayback();
+      File entry = directories_.back().directory.openNextFile();
+      if (!entry) {
+        directories_.pop_back();
+        continue;
+      }
 
-    String entryName = entry.name();
-    if (entry.isDirectory()) {
-      scanDirectoryForMp3(appendPath(directoryPath, entryName));
-    } else if (hasMp3Extension(entryName)) {
-      trackPaths.push_back(appendPath(directoryPath, entryName));
-      drawScanProgress();
+      String entryName = entry.name();
+      String entryPath = appendPath(directories_.back().path, entryName);
+      if (entry.isDirectory()) {
+        directories_.push_back({entry, entryPath});
+      } else {
+        entry.close();
+        if (hasMp3Extension(entryName)) {
+          path = entryPath;
+          return true;
+        }
+      }
     }
-
-    entry.close();
+    return false;
   }
 
-  directory.close();
-}
+ private:
+  struct Directory {
+    File directory;
+    String path;
+  };
+  std::vector<Directory> directories_;
+};
+
+SdTrackSource trackSource;
+TrackPage<SdTrackSource, String, kRowsPerPage> trackPage(trackSource);
 
 void setStatusLine(const String& status) {
   statusLine = status;
@@ -200,21 +215,20 @@ void drawTrackList() {
   tft.fillRect(0, 0, kDisplayWidth, kHeaderHeight, TFT_DARKGREY);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_WHITE, TFT_DARKGREY);
-  tft.drawString("MP3 files: " + String(trackPaths.size()), 6, kHeaderHeight / 2, 2);
+  tft.drawString("MP3 page: " + String(trackPage.page() + 1), 6, kHeaderHeight / 2, 2);
 
   tft.fillRect(0, kListTop, kListWidth, kListHeight, TFT_BLACK);
   for (uint16_t row = 0; row < kRowsPerPage; ++row) {
-    size_t index = firstVisibleTrackIndex + row;
     uint16_t rowY = kListTop + row * kRowHeight;
-    bool hasTrack = index < trackPaths.size();
-    bool isSelected = hasTrack && (index == selectedTrackIndex);
+    bool hasTrack = row < trackPage.count();
+    bool isSelected = hasTrack && (trackPage[row] == selectedTrackPath);
     uint16_t bgColor = isSelected ? TFT_NAVY : TFT_BLACK;
     uint16_t fgColor = isSelected ? TFT_YELLOW : TFT_WHITE;
     tft.fillRect(0, rowY, kListWidth, kRowHeight, bgColor);
     tft.drawFastHLine(0, rowY + kRowHeight - 1, kListWidth, TFT_DARKGREY);
     if (hasTrack) {
       tft.setTextColor(fgColor, bgColor);
-      String label = displayNameForPath(trackPaths[index]);
+      String label = displayNameForPath(trackPage[row]);
       tft.drawString(label, 6, rowY + (kRowHeight / 2), 2);
     }
   }
@@ -226,24 +240,6 @@ void drawTrackList() {
   tft.setTextColor(TFT_WHITE, TFT_DARKCYAN);
   tft.drawString("UP", kButtonX + (kButtonWidth / 2), kButtonUpY + (kListHeight / 4), 2);
   tft.drawString("DOWN", kButtonX + (kButtonWidth / 2), kButtonDownY + (kListHeight / 4), 2);
-}
-
-void scanTracks() {
-  trackPaths.clear();
-  drawScanProgress();
-  setStatusLine("Scanning SD card...");
-  scanDirectoryForMp3("/");
-
-  std::sort(trackPaths.begin(), trackPaths.end(), [](const String& left, const String& right) {
-    String loweredLeft = left;
-    String loweredRight = right;
-    loweredLeft.toLowerCase();
-    loweredRight.toLowerCase();
-    return loweredLeft < loweredRight;
-  });
-
-  selectedTrackIndex = 0;
-  firstVisibleTrackIndex = 0;
 }
 
 uint16_t readTouchRaw(uint8_t command) {
@@ -286,13 +282,13 @@ bool readTouchPoint(uint16_t& x, uint16_t& y) {
 }
 
 void handleTrackSelection(size_t index) {
-  if (index >= trackPaths.size()) {
+  if (index >= trackPage.count()) {
     return;
   }
 
-  selectedTrackIndex = index;
+  selectedTrackPath = trackPage[index];
   drawTrackList();
-  startPlayback(trackPaths[selectedTrackIndex]);
+  startPlayback(selectedTrackPath);
 }
 
 void handleTouch(uint16_t x, uint16_t y) {
@@ -302,20 +298,17 @@ void handleTouch(uint16_t x, uint16_t y) {
 
   if (x >= kButtonX) {
     if (y < kButtonDownY) {
-      if (firstVisibleTrackIndex > 0) {
-        --firstVisibleTrackIndex;
+      if (trackPage.previous()) {
         drawTrackList();
       }
-    } else if (firstVisibleTrackIndex + kRowsPerPage < trackPaths.size()) {
-      ++firstVisibleTrackIndex;
+    } else if (trackPage.next()) {
       drawTrackList();
     }
     return;
   }
 
   size_t row = (y - kListTop) / kRowHeight;
-  size_t index = firstVisibleTrackIndex + row;
-  handleTrackSelection(index);
+  handleTrackSelection(row);
 }
 
 void initTouchController() {
@@ -353,10 +346,11 @@ void setup() {
     return;
   }
 
-  scanTracks();
+  setStatusLine("Loading MP3 files...");
+  trackPage.begin();
   drawTrackList();
 
-  if (trackPaths.empty()) {
+  if (trackPage.count() == 0) {
     setStatusLine("No MP3 files found");
     return;
   }
@@ -364,7 +358,7 @@ void setup() {
   handleTrackSelection(0);
 }
 
-void loop() {
+void servicePlayback() {
   if (mp3Decoder != nullptr && mp3Decoder->isRunning() && !mp3Decoder->loop()) {
     bool reachedEnd = mp3Decoder->isRunning() &&
                       audioFile->getPos() >= audioFile->getSize();
@@ -372,8 +366,12 @@ void loop() {
     stopPlayback();
     setStatusLine(reachedEnd ? "Playback finished" : "Playback error");
   }
+}
 
-  if (trackPaths.empty()) {
+void loop() {
+  servicePlayback();
+
+  if (trackPage.count() == 0) {
     delay(50);
     return;
   }
