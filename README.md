@@ -26,9 +26,12 @@ sorted alphabetically. Only the current page is retained in memory; the first
 page is loaded at startup, and later pages are read on demand. Going back
 rescans from the root, so it can take longer on large cards.
 
-On dual-core ESP32 boards, MP3 decoding runs in its own FreeRTOS task on the
-application core (separate from Bluetooth/system core-0 tasks) so touch/UI work
-is less likely to starve Bluetooth audio.
+By default, MP3 decoding runs in the Arduino loop. The **Pinned audio** setting
+enables a separate FreeRTOS playback task on core 1 on dual-core builds. The
+setting is saved in nonvolatile storage and takes effect after a restart.
+If the second core is unavailable or task creation fails, playback falls back
+to the Arduino loop and reports the failure on the serial monitor.
+Turn pinned audio off and restart if playback stops working in that mode.
 
 Playback errors and file paths are reported on the serial monitor. MP3 files
 with ID3v2 tags are played without displaying their embedded metadata.
