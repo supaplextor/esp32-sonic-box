@@ -2,7 +2,6 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-#include <freertos/stream_buffer.h>
 
 #include "BluetoothA2DPSource.h"
 
@@ -15,7 +14,11 @@ constexpr size_t kPcmBufferBytes = 16 * 1024;
 constexpr size_t kBytesPerFrame = 4;
 
 BluetoothA2DPSource a2dpSource;
-StreamBufferHandle_t pcmBuffer = nullptr;
+uint8_t pcmBuffer[kPcmBufferBytes];
+size_t pcmReadPos = 0;
+size_t pcmWritePos = 0;
+size_t pcmCount = 0;
+portMUX_TYPE pcmBufferMux = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t devicesMutex = nullptr;
 String devices[kMaxDevices];
 size_t devicesFound = 0;
@@ -27,10 +30,28 @@ bool started = false;
 // underrun so the stream keeps running.
 int32_t provideAudioFrames(Frame* frames, int32_t frameCount) {
   size_t wanted = static_cast<size_t>(frameCount) * kBytesPerFrame;
+  uint8_t* out = reinterpret_cast<uint8_t*>(frames);
   size_t got = 0;
-  if (pcmBuffer != nullptr) {
-    got = xStreamBufferReceive(pcmBuffer, frames, wanted, 0);
+
+  portENTER_CRITICAL(&pcmBufferMux);
+  size_t toRead = pcmCount < wanted ? pcmCount : wanted;
+  size_t firstChunk = toRead;
+  if (pcmReadPos + firstChunk > kPcmBufferBytes) {
+    firstChunk = kPcmBufferBytes - pcmReadPos;
   }
+  if (firstChunk > 0) {
+    memcpy(out, pcmBuffer + pcmReadPos, firstChunk);
+    pcmReadPos = (pcmReadPos + firstChunk) % kPcmBufferBytes;
+  }
+  size_t secondChunk = toRead - firstChunk;
+  if (secondChunk > 0) {
+    memcpy(out + firstChunk, pcmBuffer + pcmReadPos, secondChunk);
+    pcmReadPos = (pcmReadPos + secondChunk) % kPcmBufferBytes;
+  }
+  pcmCount -= toRead;
+  got = toRead;
+  portEXIT_CRITICAL(&pcmBufferMux);
+
   if (got < wanted) {
     memset(reinterpret_cast<uint8_t*>(frames) + got, 0, wanted - got);
   }
@@ -59,7 +80,20 @@ bool onDeviceFound(const char* ssid, esp_bd_addr_t address, int rssi) {
       devices[devicesFound++] = ssid;
       ++listVersion;
     }
-    match = targetName.length() > 0 && targetName == ssid;
+    if (targetName.length() > 0) {
+      String foundName = ssid;
+      String wantedName = targetName;
+      foundName.trim();
+      wantedName.trim();
+      foundName.toLowerCase();
+      wantedName.toLowerCase();
+      match = foundName == wantedName ||
+              foundName.startsWith(wantedName) ||
+              wantedName.startsWith(foundName);
+      if (match) {
+        Serial.printf("BT audio: matched device \"%s\"\n", ssid);
+      }
+    }
     xSemaphoreGive(devicesMutex);
   }
   return match;
@@ -71,25 +105,33 @@ void begin(const String& targetDeviceName) {
   if (started) {
     return;
   }
-  if (pcmBuffer == nullptr) {
-    pcmBuffer = xStreamBufferCreate(kPcmBufferBytes, 1);
-  }
   if (devicesMutex == nullptr) {
     devicesMutex = xSemaphoreCreateMutex();
   }
-  if (pcmBuffer == nullptr || devicesMutex == nullptr) {
+  if (devicesMutex == nullptr) {
     Serial.println("BT audio: unable to allocate buffers");
     return;
   }
+
+  portENTER_CRITICAL(&pcmBufferMux);
+  pcmReadPos = 0;
+  pcmWritePos = 0;
+  pcmCount = 0;
+  portEXIT_CRITICAL(&pcmBufferMux);
 
   targetName = targetDeviceName;
   a2dpSource.set_local_name("ESP32 Sonic Box");
   // Name-based connect via the ssid callback keeps behavior predictable when
   // the user switches devices, so skip address-based auto reconnect.
   a2dpSource.set_auto_reconnect(false);
-  a2dpSource.set_ssid_callback(onDeviceFound);
   a2dpSource.set_data_callback_in_frames(provideAudioFrames);
-  a2dpSource.start();
+  if (targetName.length() > 0) {
+    a2dpSource.set_ssid_callback(nullptr);
+    a2dpSource.start(targetName.c_str());
+  } else {
+    a2dpSource.set_ssid_callback(onDeviceFound);
+    a2dpSource.start();
+  }
   started = true;
 }
 
@@ -146,16 +188,34 @@ uint32_t deviceListVersion() {
 }
 
 size_t writeFrames(const uint8_t* data, size_t frameCount) {
-  if (!started || pcmBuffer == nullptr) {
+  if (!started) {
     return 0;
   }
   size_t bytes = frameCount * kBytesPerFrame;
-  // Loop task is the only writer, so available space can only grow between
-  // this check and the send; whole frames are never split.
-  if (xStreamBufferSpacesAvailable(pcmBuffer) < bytes) {
+
+  portENTER_CRITICAL(&pcmBufferMux);
+  size_t space = kPcmBufferBytes - pcmCount;
+  if (space < bytes) {
+    portEXIT_CRITICAL(&pcmBufferMux);
     return 0;
   }
-  return xStreamBufferSend(pcmBuffer, data, bytes, 0) / kBytesPerFrame;
+
+  size_t firstChunk = bytes;
+  if (pcmWritePos + firstChunk > kPcmBufferBytes) {
+    firstChunk = kPcmBufferBytes - pcmWritePos;
+  }
+  if (firstChunk > 0) {
+    memcpy(pcmBuffer + pcmWritePos, data, firstChunk);
+    pcmWritePos = (pcmWritePos + firstChunk) % kPcmBufferBytes;
+  }
+  size_t secondChunk = bytes - firstChunk;
+  if (secondChunk > 0) {
+    memcpy(pcmBuffer + pcmWritePos, data + firstChunk, secondChunk);
+    pcmWritePos = (pcmWritePos + secondChunk) % kPcmBufferBytes;
+  }
+  pcmCount += bytes;
+  portEXIT_CRITICAL(&pcmBufferMux);
+  return frameCount;
 }
 
 }  // namespace bt_audio

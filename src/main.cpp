@@ -64,6 +64,8 @@ bool sdReady = false;
 bool btEnabled = false;
 String btDeviceName;
 bool btScanOpen = false;
+bool waitingForBtConnection = false;
+bool startWhenBtConnected = false;
 
 AudioFileSourceSdSingleBlock* audioFile = nullptr;
 AudioOutput* audioOutput = nullptr;
@@ -75,11 +77,16 @@ constexpr UBaseType_t kPlaybackTaskPriority = 3;
 // Keep decoder servicing on the Arduino app core. Core 0 already runs the
 // Bluetooth stack and system tasks.
 constexpr BaseType_t kPlaybackTaskCore = 1;
+// Decoder work used to run on the Arduino loop task with a larger stack.
+// Give the dedicated playback task headroom to avoid stack-corruption issues.
+constexpr uint32_t kPlaybackTaskStackWords = 8192;
+constexpr TickType_t kPlaybackActiveTick = pdMS_TO_TICKS(1);
 constexpr TickType_t kPlaybackIdleTick = pdMS_TO_TICKS(2);
 volatile uint8_t playbackStatusCode = 0;
 constexpr uint8_t kPlaybackStatusNone = 0;
 constexpr uint8_t kPlaybackStatusFinished = 1;
 constexpr uint8_t kPlaybackStatusError = 2;
+constexpr uint8_t kPlaybackStatusWaitingBt = 3;
 
 bool touchWasDown = false;
 unsigned long lastTouchHandledAtMs = 0;
@@ -187,6 +194,8 @@ void stopPlayback() {
     return;
   }
   stopPlaybackLocked();
+  waitingForBtConnection = false;
+  startWhenBtConnected = false;
   xSemaphoreGive(playbackMutex);
 }
 
@@ -197,6 +206,17 @@ void startPlayback(const String& path) {
   }
   if (!SD.exists(path.c_str())) {
     setStatusLine("Track missing: " + displayNameForPath(path));
+    waitingForBtConnection = false;
+    startWhenBtConnected = false;
+    xSemaphoreGive(playbackMutex);
+    return;
+  }
+
+  if (btEnabled && !bt_audio::isConnected()) {
+    stopPlaybackLocked();
+    waitingForBtConnection = true;
+    startWhenBtConnected = true;
+    setStatusLine("Waiting for BT: " + displayNameForPath(path));
     xSemaphoreGive(playbackMutex);
     return;
   }
@@ -207,6 +227,8 @@ void startPlayback(const String& path) {
   if (!audioFile->isOpen()) {
     Serial.printf("Unable to open %s\n", path.c_str());
     setStatusLine("Unable to open track");
+    waitingForBtConnection = false;
+    startWhenBtConnected = false;
     stopPlaybackLocked();
     xSemaphoreGive(playbackMutex);
     return;
@@ -218,6 +240,8 @@ void startPlayback(const String& path) {
   if (fileSize == 0 || headerLength != std::min(static_cast<uint32_t>(sizeof(header)), fileSize)) {
     Serial.printf("Unable to read MP3 header: %s\n", path.c_str());
     setStatusLine("Unable to read track");
+    waitingForBtConnection = false;
+    startWhenBtConnected = false;
     stopPlaybackLocked();
     xSemaphoreGive(playbackMutex);
     return;
@@ -227,6 +251,8 @@ void startPlayback(const String& path) {
   if (id3AudioOffset(header, headerLength, fileSize, audioOffset) == Id3HeaderResult::Invalid) {
     Serial.printf("Invalid ID3 header: %s\n", path.c_str());
     setStatusLine("Invalid MP3 header");
+    waitingForBtConnection = false;
+    startWhenBtConnected = false;
     stopPlaybackLocked();
     xSemaphoreGive(playbackMutex);
     return;
@@ -234,6 +260,8 @@ void startPlayback(const String& path) {
   if (!audioFile->seek(audioOffset, SEEK_SET)) {
     Serial.printf("Unable to seek to MP3 audio: %s\n", path.c_str());
     setStatusLine("Unable to read track");
+    waitingForBtConnection = false;
+    startWhenBtConnected = false;
     stopPlaybackLocked();
     xSemaphoreGive(playbackMutex);
     return;
@@ -250,16 +278,16 @@ void startPlayback(const String& path) {
   if (!mp3Decoder->begin(audioFile, audioOutput)) {
     Serial.printf("Unable to start decoder: %s\n", path.c_str());
     setStatusLine("Failed to play: " + displayNameForPath(path));
+    waitingForBtConnection = false;
+    startWhenBtConnected = false;
     stopPlaybackLocked();
     xSemaphoreGive(playbackMutex);
     return;
   }
 
-  if (btEnabled && !bt_audio::isConnected()) {
-    setStatusLine("Waiting for BT: " + displayNameForPath(path));
-  } else {
-    setStatusLine("Playing: " + displayNameForPath(path));
-  }
+  waitingForBtConnection = false;
+  startWhenBtConnected = false;
+  setStatusLine("Playing: " + displayNameForPath(path));
   Serial.printf("Playing %s\n", path.c_str());
   xSemaphoreGive(playbackMutex);
 }
@@ -550,14 +578,14 @@ void setup() {
           [](void*) {
             while (true) {
               if (servicePlayback()) {
-                taskYIELD();
+                vTaskDelay(kPlaybackActiveTick);
               } else {
                 vTaskDelay(kPlaybackIdleTick);
               }
             }
           },
           "playback-loop",
-          4096,
+          kPlaybackTaskStackWords,
           nullptr,
           kPlaybackTaskPriority,
           &playbackTaskHandle,
@@ -580,12 +608,21 @@ bool servicePlayback() {
     return false;
   }
   bool running = mp3Decoder != nullptr && mp3Decoder->isRunning();
+  if (btEnabled && running && !bt_audio::isConnected()) {
+    stopPlaybackLocked();
+    waitingForBtConnection = true;
+    startWhenBtConnected = selectedTrackPath.length() > 0;
+    playbackStatusCode = kPlaybackStatusWaitingBt;
+    running = false;
+  }
   if (mp3Decoder != nullptr && mp3Decoder->isRunning() && !mp3Decoder->loop()) {
-    bool reachedEnd = mp3Decoder->isRunning() &&
+    bool reachedEnd = mp3Decoder->isRunning() && audioFile != nullptr &&
                       audioFile->getPos() >= audioFile->getSize();
     Serial.println(reachedEnd ? "Playback finished" : "Playback stopped: decoder error");
     stopPlaybackLocked();
     playbackStatusCode = reachedEnd ? kPlaybackStatusFinished : kPlaybackStatusError;
+    waitingForBtConnection = false;
+    startWhenBtConnected = false;
     running = false;
   }
   xSemaphoreGive(playbackMutex);
@@ -593,10 +630,23 @@ bool servicePlayback() {
 }
 
 void loop() {
+  if (waitingForBtConnection && bt_audio::isConnected()) {
+    waitingForBtConnection = false;
+    if (startWhenBtConnected && selectedTrackPath.length() > 0) {
+      startPlayback(selectedTrackPath);
+    }
+  }
+
   if (playbackStatusCode != kPlaybackStatusNone) {
     uint8_t status = playbackStatusCode;
     playbackStatusCode = kPlaybackStatusNone;
-    setStatusLine(status == kPlaybackStatusFinished ? "Playback finished" : "Playback error");
+    if (status == kPlaybackStatusFinished) {
+      setStatusLine("Playback finished");
+    } else if (status == kPlaybackStatusWaitingBt) {
+      setStatusLine("Waiting for BT: " + displayNameForPath(selectedTrackPath));
+    } else {
+      setStatusLine("Playback error");
+    }
   }
 
   if (btScanOpen) {
