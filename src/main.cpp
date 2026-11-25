@@ -59,6 +59,8 @@ String statusLine = "Loading MP3 files...";
 Preferences preferences;
 bool singleBlockReads = true;
 bool slowSdClock = false;
+bool pinnedPlaybackSetting = false;
+bool pinnedPlaybackActive = false;
 bool settingsOpen = false;
 bool sdReady = false;
 bool btEnabled = false;
@@ -70,8 +72,8 @@ bool startWhenBtConnected = false;
 AudioFileSourceSdSingleBlock* audioFile = nullptr;
 AudioOutput* audioOutput = nullptr;
 AudioGeneratorMP3* mp3Decoder = nullptr;
+bool playbackUsesBluetooth = false;
 SemaphoreHandle_t playbackMutex = nullptr;
-TaskHandle_t playbackTaskHandle = nullptr;
 
 constexpr UBaseType_t kPlaybackTaskPriority = 3;
 // Keep decoder servicing on the Arduino app core. Core 0 already runs the
@@ -79,10 +81,10 @@ constexpr UBaseType_t kPlaybackTaskPriority = 3;
 constexpr BaseType_t kPlaybackTaskCore = 1;
 // Decoder work used to run on the Arduino loop task with a larger stack.
 // Give the dedicated playback task headroom to avoid stack-corruption issues.
-constexpr uint32_t kPlaybackTaskStackWords = 8192;
-constexpr TickType_t kPlaybackActiveTick = pdMS_TO_TICKS(1);
-constexpr TickType_t kPlaybackIdleTick = pdMS_TO_TICKS(2);
-volatile uint8_t playbackStatusCode = 0;
+constexpr uint32_t kPlaybackTaskStackBytes = 8192;
+constexpr TickType_t kPlaybackActiveTick = pdMS_TO_TICKS(1) > 0 ? pdMS_TO_TICKS(1) : 1;
+constexpr TickType_t kPlaybackIdleTick = pdMS_TO_TICKS(2) > 0 ? pdMS_TO_TICKS(2) : 1;
+uint8_t playbackStatusCode = 0;
 constexpr uint8_t kPlaybackStatusNone = 0;
 constexpr uint8_t kPlaybackStatusFinished = 1;
 constexpr uint8_t kPlaybackStatusError = 2;
@@ -116,6 +118,14 @@ String appendPath(const String& directory, const String& name) {
 }
 
 bool servicePlayback();
+
+bool pinnedPlaybackSupported() {
+#if defined(CONFIG_FREERTOS_UNICORE) && CONFIG_FREERTOS_UNICORE
+  return false;
+#else
+  return ESP.getChipCores() > 1;
+#endif
+}
 
 class SdTrackSource {
  public:
@@ -187,6 +197,7 @@ void stopPlaybackLocked() {
     delete audioOutput;
     audioOutput = nullptr;
   }
+  playbackUsesBluetooth = false;
 }
 
 void stopPlayback() {
@@ -204,6 +215,7 @@ void startPlayback(const String& path) {
     setStatusLine("Playback unavailable");
     return;
   }
+  playbackStatusCode = kPlaybackStatusNone;
   if (!SD.exists(path.c_str())) {
     setStatusLine("Track missing: " + displayNameForPath(path));
     waitingForBtConnection = false;
@@ -285,6 +297,7 @@ void startPlayback(const String& path) {
     return;
   }
 
+  playbackUsesBluetooth = btEnabled;
   waitingForBtConnection = false;
   startWhenBtConnected = false;
   setStatusLine("Playing: " + displayNameForPath(path));
@@ -345,7 +358,9 @@ void drawSettings() {
   tft.drawString("Bluetooth: " + btStatus, 6, 112, 2);
   tft.drawString("BT device: " + (btDeviceName.length() > 0 ? btDeviceName : String("none")),
                  6, 144, 2);
-  tft.drawString("Reads/BT: next track; clock: restart", 6, 180, 2);
+  tft.drawString(String("Pinned audio: ") + (pinnedPlaybackSetting ? "ON" : "OFF"),
+                 6, 176, 2);
+  tft.drawString("Clock/pinned: restart", 6, 204, 2);
 }
 
 void drawBtScan() {
@@ -487,6 +502,19 @@ void handleTouch(uint16_t x, uint16_t y) {
       } else {
         setStatusLine("Turn Bluetooth on first");
       }
+    } else if (y >= 160 && y < 192) {
+      if (!pinnedPlaybackSetting && !pinnedPlaybackSupported()) {
+        setStatusLine("Pinned audio needs two cores");
+      } else {
+        bool value = !pinnedPlaybackSetting;
+        if (preferences.putBool("pinnedAudio", value) == 1) {
+          pinnedPlaybackSetting = value;
+          setStatusLine("Saved; restart to apply");
+        } else {
+          setStatusLine("Unable to save setting");
+        }
+        drawSettings();
+      }
     }
     return;
   }
@@ -551,6 +579,7 @@ void setup() {
   if (preferences.begin("sonic-settings", false)) {
     singleBlockReads = preferences.getBool("singleBlock", true);
     slowSdClock = preferences.getBool("slowClock", false);
+    pinnedPlaybackSetting = preferences.getBool("pinnedAudio", false);
     btEnabled = preferences.getBool("btOn", false);
     btDeviceName = preferences.getString("btDevice", "");
   } else {
@@ -574,7 +603,9 @@ void setup() {
   trackPage.begin();
   drawTrackList();
 
-  if (xTaskCreatePinnedToCore(
+  bool pinnedPlaybackUnavailable = false;
+  if (pinnedPlaybackSetting && pinnedPlaybackSupported() &&
+      xTaskCreatePinnedToCore(
           [](void*) {
             while (true) {
               if (servicePlayback()) {
@@ -585,14 +616,15 @@ void setup() {
             }
           },
           "playback-loop",
-          kPlaybackTaskStackWords,
+          kPlaybackTaskStackBytes,
           nullptr,
           kPlaybackTaskPriority,
-          &playbackTaskHandle,
-          kPlaybackTaskCore) != pdPASS) {
-    Serial.println("Unable to create playback task.");
-    setStatusLine("Playback unavailable");
-    return;
+          nullptr,
+          kPlaybackTaskCore) == pdPASS) {
+    pinnedPlaybackActive = true;
+  } else if (pinnedPlaybackSetting) {
+    Serial.println("Pinned playback unavailable; using Arduino loop.");
+    pinnedPlaybackUnavailable = true;
   }
 
   if (trackPage.count() == 0) {
@@ -601,6 +633,9 @@ void setup() {
   }
 
   handleTrackSelection(0);
+  if (pinnedPlaybackUnavailable && mp3Decoder != nullptr) {
+    setStatusLine("Pinned unavailable; using loop");
+  }
 }
 
 bool servicePlayback() {
@@ -608,21 +643,12 @@ bool servicePlayback() {
     return false;
   }
   bool running = mp3Decoder != nullptr && mp3Decoder->isRunning();
-  if (btEnabled && running && !bt_audio::isConnected()) {
-    stopPlaybackLocked();
-    waitingForBtConnection = true;
-    startWhenBtConnected = selectedTrackPath.length() > 0;
-    playbackStatusCode = kPlaybackStatusWaitingBt;
-    running = false;
-  }
   if (mp3Decoder != nullptr && mp3Decoder->isRunning() && !mp3Decoder->loop()) {
     bool reachedEnd = mp3Decoder->isRunning() && audioFile != nullptr &&
                       audioFile->getPos() >= audioFile->getSize();
     Serial.println(reachedEnd ? "Playback finished" : "Playback stopped: decoder error");
     stopPlaybackLocked();
     playbackStatusCode = reachedEnd ? kPlaybackStatusFinished : kPlaybackStatusError;
-    waitingForBtConnection = false;
-    startWhenBtConnected = false;
     running = false;
   }
   xSemaphoreGive(playbackMutex);
@@ -630,22 +656,42 @@ bool servicePlayback() {
 }
 
 void loop() {
-  if (waitingForBtConnection && bt_audio::isConnected()) {
-    waitingForBtConnection = false;
-    if (startWhenBtConnected && selectedTrackPath.length() > 0) {
-      startPlayback(selectedTrackPath);
-    }
+  if (!pinnedPlaybackActive) {
+    servicePlayback();
   }
 
-  if (playbackStatusCode != kPlaybackStatusNone) {
-    uint8_t status = playbackStatusCode;
+  uint8_t status = kPlaybackStatusNone;
+  if (playbackMutex != nullptr && xSemaphoreTake(playbackMutex, portMAX_DELAY) == pdTRUE) {
+    if (playbackUsesBluetooth && mp3Decoder != nullptr && mp3Decoder->isRunning() &&
+        !bt_audio::isConnected()) {
+      stopPlaybackLocked();
+      waitingForBtConnection = true;
+      startWhenBtConnected = selectedTrackPath.length() > 0;
+      playbackStatusCode = kPlaybackStatusWaitingBt;
+    }
+    status = playbackStatusCode;
     playbackStatusCode = kPlaybackStatusNone;
+    xSemaphoreGive(playbackMutex);
+  }
+
+  if (status != kPlaybackStatusNone) {
     if (status == kPlaybackStatusFinished) {
+      waitingForBtConnection = false;
+      startWhenBtConnected = false;
       setStatusLine("Playback finished");
     } else if (status == kPlaybackStatusWaitingBt) {
       setStatusLine("Waiting for BT: " + displayNameForPath(selectedTrackPath));
     } else {
+      waitingForBtConnection = false;
+      startWhenBtConnected = false;
       setStatusLine("Playback error");
+    }
+  }
+
+  if (waitingForBtConnection && bt_audio::isConnected()) {
+    waitingForBtConnection = false;
+    if (startWhenBtConnected && selectedTrackPath.length() > 0) {
+      startPlayback(selectedTrackPath);
     }
   }
 
